@@ -349,4 +349,252 @@ document.addEventListener("DOMContentLoaded", function() {
   }
 });
 function toggleSettingsModal() {
-  const modal = document.ge
+  const modal = document.getElementById('settingsModal');
+  modal.style.display = (modal.style.display === 'block' ? 'none' : 'block');
+}
+function closeSaveModal() { console.log('closeSaveModal (real) called'); }
+function openSaveModal(mode) { console.log('openSaveModal (real) called with mode:', mode); }
+function copySaveToClipboard() { console.log('copySaveToClipboard (real) called'); }
+function downloadSave() { console.log('downloadSave (real) called'); }
+function importSave() { console.log('importSave (real) called'); }
+function showCheaterOverlay() {
+  unlockAchievement("cheater");
+  document.getElementById("cheaterOverlay").style.display = "flex";
+  document.getElementById("clickButton").disabled = true;
+  document.getElementById("settingsIcon").onclick = null;
+  document.getElementById("settingsIcon").style.pointerEvents = "none";
+  document.body.classList.add("cheater-mode");
+}
+async function sha256(s) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+function crc32(str) {
+  let crc = 0 ^ (-1);
+  for (let i = 0; i < str.length; i++) {
+    crc = (crc >>> 8) ^ [0,1996959894,3993919788,2567524794,124634137,1886057615,3915621685,2657392035,249268274,2044508324,3772115230,2547177864,162941995,2125561021,3887607047,2428444049][(crc ^ str.charCodeAt(i)) & 15];
+  }
+  return (crc ^ (-1)) >>> 0;
+}
+function getSaveData() {
+  return {
+    version: GAME_VERSION,
+    model: GAME_MODEL,
+    points,
+    autoClickersCount,
+    doublePointsActive,
+    goldenClickReady,
+    luckBoostActive,
+    timeFreezeActive,
+    goldenModeActive,
+    totalClicks,
+    logData,
+    ownedBackgrounds,
+    activeBackground,
+    achievements: loadAchievementState(),
+    lifetimePoints,
+    secondsPlayed: Math.floor((Date.now() - startTime) / 1000)
+  };
+}
+async function importSave() {
+  const textarea = document.getElementById("saveTextarea");
+  const errorDiv = document.getElementById("importError");
+  const lines = textarea.value.trim().split("\n");
+  if (lines.length < 4 || !lines[0].startsWith("RARITYCLICKER-SAVE")) {
+    errorDiv.textContent = "Invalid save format!";
+    return;
+  }
+  const [hdr, cs1, cs2, b64] = lines;
+  let saveStr;
+  try {
+    saveStr = decodeURIComponent(escape(atob(b64)));
+  } catch (e) {
+    errorDiv.textContent = "Corrupted save data!";
+    return;
+  }
+  // Validate checksums
+  const salt1 = "rarityclicker-1";
+  const salt2 = "rarityclicker-2";
+  const cs1Calc = await sha256(saveStr + salt1);
+  const cs2Calc = crc32(saveStr + salt2).toString(16);
+  if (cs1 !== cs1Calc || cs2 !== cs2Calc) {
+    closeSaveModal();
+    showCheaterOverlay();
+    return;
+  }
+  let obj;
+  try {
+    obj = JSON.parse(saveStr);
+  } catch (e) {
+    errorDiv.textContent = "Invalid save data!";
+    return;
+  }
+  if (!obj.model || !obj.version) {
+    errorDiv.textContent = "Save missing model/version info!";
+    return;
+  }
+  if (obj.model !== GAME_MODEL) {
+    errorDiv.textContent = `Model mismatch! This save is for model "${obj.model}", but you're using "${GAME_MODEL}". You cannot load saves across models.`;
+    return;
+  }
+  // Overwrite all relevant game data
+  points = obj.points || 0;
+  autoClickersCount = obj.autoClickersCount || 0;
+  doublePointsActive = !!obj.doublePointsActive;
+  goldenClickReady = !!obj.goldenClickReady;
+  luckBoostActive = !!obj.luckBoostActive;
+  timeFreezeActive = !!obj.timeFreezeActive;
+  goldenModeActive = !!obj.goldenModeActive;
+  totalClicks = obj.totalClicks || 0;
+  logData = obj.logData || [];
+  ownedBackgrounds = obj.ownedBackgrounds || {};
+  activeBackground = obj.activeBackground || "Light Blue";
+  lifetimePoints = obj.lifetimePoints || 0;
+  secondsPlayed = obj.secondsPlayed || 0;
+  localStorage.setItem("points", points);
+  localStorage.setItem("autoClickersCount", autoClickersCount);
+  localStorage.setItem("doublePointsActive", doublePointsActive);
+  localStorage.setItem("goldenClickReady", goldenClickReady);
+  localStorage.setItem("luckBoostActive", luckBoostActive);
+  localStorage.setItem("timeFreezeActive", timeFreezeActive);
+  localStorage.setItem("goldenModeActive", goldenModeActive);
+  localStorage.setItem("totalClicks", totalClicks);
+  localStorage.setItem("logData", JSON.stringify(logData));
+  localStorage.setItem("ownedBackgrounds", JSON.stringify(ownedBackgrounds));
+  localStorage.setItem("activeBackground", activeBackground);
+  localStorage.setItem("lifetimePoints", lifetimePoints);
+  localStorage.setItem("secondsPlayed", secondsPlayed);
+  saveAchievementState(obj.achievements || {});
+  updateShopDisplays();
+  updateBackgroundShop && updateBackgroundShop();
+  updateStats();
+  updateLogElement();
+  setDefaultBackground && setDefaultBackground();
+  renderAchievements && renderAchievements();
+  closeSaveModal();
+}
+// --- Clicking ---
+document.getElementById("clickButton").addEventListener("click", function() {
+  generateRarity(true);
+});
+let pointsPerClick = 1; // was higher before
+let autoClickerPoints = 1; // was higher before
+// Buff timer state
+let buffTimers = {
+  doublePoints: 0,
+  goldenClick: 0,
+  luckBoost: 0,
+  timeFreeze: 0,
+  goldenMode: 0
+};
+let buffIntervals = {};
+
+function renderBuffTimers() {
+  const buffDiv = document.getElementById('buffTimers');
+  let html = '';
+  if (buffTimers.doublePoints > 0) html += `<span style="color:#a80;font-weight:bold;">Double Points: ${buffTimers.doublePoints}s</span>`;
+  if (buffTimers.luckBoost > 0) html += `<span style="color:#0a0;font-weight:bold;">Luck Boost: ${buffTimers.luckBoost}s</span>`;
+  if (buffTimers.timeFreeze > 0) html += `<span style="color:#08c;font-weight:bold;">Time Freeze: ${buffTimers.timeFreeze}s</span>`;
+  if (buffTimers.goldenMode > 0) html += `<span style="color:#e6b800;font-weight:bold;">Golden Mode: ${buffTimers.goldenMode}s</span>`;
+  buffDiv.innerHTML = html;
+}
+
+function startBuffTimer(buff, duration) {
+  buffTimers[buff] = duration;
+  renderBuffTimers();
+  if (buffIntervals[buff]) clearInterval(buffIntervals[buff]);
+  buffIntervals[buff] = setInterval(() => {
+    buffTimers[buff]--;
+    renderBuffTimers();
+    if (buffTimers[buff] <= 0) {
+      clearInterval(buffIntervals[buff]);
+      buffTimers[buff] = 0;
+      renderBuffTimers();
+      if (buff === 'doublePoints') doublePointsActive = false;
+      if (buff === 'luckBoost') luckBoostActive = false;
+      if (buff === 'timeFreeze') timeFreezeActive = false;
+      if (buff === 'goldenMode') goldenModeActive = false;
+    }
+  }, 1000);
+}
+
+function generateRarity(isManual = true) {
+  totalClicks++;
+  localStorage.setItem("totalClicks", totalClicks);
+  checkGeneralAchievements();
+  let foundRarity = "";
+  let multiplier = 1;
+  let roll = Math.random() * 100;
+  let cumulative = 0;
+  let rarityList = rarities;
+  // Luck Boost: remove Common, shift all down
+  if (luckBoostActive && buffTimers.luckBoost > 0) {
+    rarityList = rarities.filter(r => r.name !== "Common");
+    let totalChance = rarityList.reduce((a, b) => a + b.chance, 0);
+    roll = Math.random() * totalChance;
+  }
+  // Golden Mode: all clicks Legendary or above
+  if (goldenModeActive && buffTimers.goldenMode > 0) {
+    rarityList = rarities.filter(r => r.name === "Legendary" || r.name === "Mythic" || r.name === "Chroma" || r.name === "Godly" || r.name === "Impossible" || r.name === "Ethereal" || r.name === "Extraordinary" || r.name === "Cosmic" || r.name === "Transcendent" || r.name === "Paradoxical" || r.name === "Absolute" || r.name === "Omniversal" || r.name === "Impossible+" || r.name === "Divine" || r.name === "Singular" || r.name === "Eternal" || r.name === "Quantum" || r.name === "Quantum+" || r.name === "Fractal" || r.name === "Glitched" || r.name === "Exotic" || r.name === "Hallowed" || r.name === "Primordial" || r.name === "Nuclear" || r.name === "Radiant" || r.name === "Corrupted" || r.name === "Frozen" || r.name === "Infernal" || r.name === "Parallel" || r.name === "Temporal" || r.name === "Anomalous" || r.name === "Ascended" || r.name === "Unobtainium" || r.name === "Galactic" || r.name === "Supreme" || r.name === "Ancient" || r.name === "Enigmatic" || r.name === "Spectral" || r.name === "Astral" || r.name === "Solar" || r.name === "Lunar" || r.name === "Stellar" || r.name === "Nebulous" || r.name === "Void" || r.name === "Dimensional" || r.name === "Hyper" || r.name === "Ultra" || r.name === "Mega" || r.name === "Nano" || r.name === "Micro" || r.name === "Pico" || r.name === "Femto" || r.name === "Atto" || r.name === "Zepto" || r.name === "Yocto" || r.name === "Planck" || r.name === "Infinity" || r.name === "Omega" || r.name === "Alpha" || r.name === "Beta" || r.name === "Gamma" || r.name === "Delta" || r.name === "Epsilon" || r.name === "Zeta" || r.name === "Theta" || r.name === "Iota" || r.name === "Kappa" || r.name === "Lambda" || r.name === "Sigma" || r.name === "Tau" || r.name === "Upsilon" || r.name === "Phi" || r.name === "Chi" || r.name === "Psi" || r.name === "Omega+" || r.name === "Reality" || r.name === "Oblivion" || r.name === "Unseen" || r.name === "Shadow" || r.name === "Ghost" || r.name === "Phantom" || r.name === "Ultra Secret" || r.name === "Secret" || r.name === "???");
+    let totalChance = rarityList.reduce((a, b) => a + b.chance, 0);
+    roll = Math.random() * totalChance;
+  }
+  // Golden Click: next click is Legendary or above (for Z)
+  if (goldenClickReady && GAME_MODEL.toLowerCase() === 'z') {
+    rarityList = rarities.filter(r => r.name === "Legendary" || r.name === "Mythic" || r.name === "Chroma" || r.name === "Godly" || r.name === "Impossible" || r.name === "Ethereal" || r.name === "Extraordinary" || r.name === "Cosmic" || r.name === "Transcendent" || r.name === "Paradoxical" || r.name === "Absolute" || r.name === "Omniversal" || r.name === "Impossible+" || r.name === "Divine" || r.name === "Singular" || r.name === "Eternal" || r.name === "Quantum" || r.name === "Quantum+" || r.name === "Fractal" || r.name === "Glitched" || r.name === "Exotic" || r.name === "Hallowed" || r.name === "Primordial" || r.name === "Nuclear" || r.name === "Radiant" || r.name === "Corrupted" || r.name === "Frozen" || r.name === "Infernal" || r.name === "Parallel" || r.name === "Temporal" || r.name === "Anomalous" || r.name === "Ascended" || r.name === "Unobtainium" || r.name === "Galactic" || r.name === "Supreme" || r.name === "Ancient" || r.name === "Enigmatic" || r.name === "Spectral" || r.name === "Astral" || r.name === "Solar" || r.name === "Lunar" || r.name === "Stellar" || r.name === "Nebulous" || r.name === "Void" || r.name === "Dimensional" || r.name === "Hyper" || r.name === "Ultra" || r.name === "Mega" || r.name === "Nano" || r.name === "Micro" || r.name === "Pico" || r.name === "Femto" || r.name === "Atto" || r.name === "Zepto" || r.name === "Yocto" || r.name === "Planck" || r.name === "Infinity" || r.name === "Omega" || r.name === "Alpha" || r.name === "Beta" || r.name === "Gamma" || r.name === "Delta" || r.name === "Epsilon" || r.name === "Zeta" || r.name === "Theta" || r.name === "Iota" || r.name === "Kappa" || r.name === "Lambda" || r.name === "Sigma" || r.name === "Tau" || r.name === "Upsilon" || r.name === "Phi" || r.name === "Chi" || r.name === "Psi" || r.name === "Omega+" || r.name === "Reality" || r.name === "Oblivion" || r.name === "Unseen" || r.name === "Shadow" || r.name === "Ghost" || r.name === "Phantom" || r.name === "Ultra Secret" || r.name === "Secret" || r.name === "???");
+    let totalChance = rarityList.reduce((a, b) => a + b.chance, 0);
+    roll = Math.random() * totalChance;
+    goldenClickReady = false;
+    localStorage.setItem("goldenClickReady", goldenClickReady);
+    updateShopDisplays();
+  }
+  // Time Freeze: freeze timer
+  if (timeFreezeActive && buffTimers.timeFreeze > 0) {
+    // Don't increment secondsPlayed in updateTimer (handled there)
+  }
+  for (let r of rarityList) {
+    cumulative += r.chance;
+    if (roll <= cumulative) {
+      foundRarity = r.name;
+      break;
+    }
+  }
+  let basePoints = rarityPoints[foundRarity] || 0;
+  let earned = basePoints * (doublePointsActive && buffTimers.doublePoints > 0 ? 2 : 1);
+  points += earned;
+  if (points < 0) points = 0;
+  lifetimePoints += Math.max(0, earned);
+  localStorage.setItem("points", points);
+  localStorage.setItem("lifetimePoints", lifetimePoints);
+  if (!logData.includes(foundRarity)) {
+    logData.push(foundRarity);
+    updateLogElement();
+  } else {
+    updateLogElement();
+  }
+  updateShopDisplays();
+  const resultElem = document.getElementById("result");
+  resultElem.innerText = "You got: " + foundRarity + " (" + (earned >= 0 ? "+" : "") + earned + " pts)";
+  checkRarityAchievements(foundRarity);
+  updateStats();
+}
+
+// Ensure toggleShopModal is globally accessible
+if (typeof toggleShopModal === 'function') {
+  window.toggleShopModal = toggleShopModal;
+} else {
+  window.toggleShopModal = function() {};
+}
+// Ensure updateStats exists
+if (typeof updateStats !== 'function') {
+  function updateStats() {}
+}
+// Ensure checkGeneralAchievements exists
+if (typeof checkGeneralAchievements !== 'function') {
+  function checkGeneralAchievements() {}
+}
+function checkRarityAchievements() {}
+function updateShopDisplays() {}
+function updateLogElement() {}
+function resetGame() { console.log('resetGame (real) called'); }
+function softResetGame() { console.log('softResetGame (real) called'); }
