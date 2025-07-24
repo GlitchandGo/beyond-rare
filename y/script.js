@@ -225,3 +225,14 @@ function updateTimer() {
   }
 }
 setInterval(updateTimer, 100);
+/******** Mute/Play Music *******/
+document.getElementById("musicToggleBtn").addEventListener("click", function () {
+  const bgm = document.getElementById("bgm");
+  if (bgm.paused) {
+    bgm.play();
+    this.textContent = "Mute Music";
+  } else {
+    bgm.pause();
+    this.textContent = "Unmute Music";
+  }
+});
